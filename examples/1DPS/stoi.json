@@ -1,0 +1,23 @@
+[
+  {
+    "entry_id": "1DPS",
+    "entity_id": "1",
+    "uniprot_id": "P0ABT2",
+    "asym_ids": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L"
+    ],
+    "sequence": "MSTAKLVKSKATNLLYTRNDVSDSEKKATVELLNRQVIQFIDLSLITKQAHWNMRGANFIAVHEMLDGFRTALIDHLDTMAERAVQLGGVALGTTQVINSKTPLKSYPLDIHNVQDHLKELADRYAIVANDVRKAIGEAKDDDTADILTAASRDLDKFLWFIECNIE",
+    "length": 167
+  }
+]

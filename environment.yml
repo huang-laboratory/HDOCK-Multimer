@@ -1,0 +1,9 @@
+name: HDM_test
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8
+  - openmm=8.1.1
+  - pip
+  - pandas>=2.0
+  - pdbfixer
