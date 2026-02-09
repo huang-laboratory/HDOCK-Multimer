@@ -1,14 +1,14 @@
 # HDOCK-Multimer
 
-`HDOCK-Multimer (HDM)` is a computational tool developed for predicting the structure of large protein assemblies. 
+`HDOCK-Multimer (HDM)` is an automated computational tool developed for predicting the structure of large protein assemblies. 
 
-With the stoichiometry file, AlphaFold-predicted monomer and subcomponent structures as input, `HDM` automatically selects suitable modeling strategies, including asymmetric docking, symmetric docking and assembly. The final output is a set of ranked predicted structures of the full complex. 
+With the stoichiometry file, provided monomer and subcomponent structures as input, `HDM` automatically selects suitable modeling strategies, including asymmetric docking, symmetric docking and assembly, and build the multimer structure. The final output is a set of ranked predicted structures of the full complex. 
 
 The `HDM` pipeline consists of 4 stages:
-1. Defining subunits in stoichiometry file.
-2. Predicting monomer and subcomponent structures using AF2/AFM.
-3. Determining suitable modeling strategies.
-4. Performing selected modeling strategies to model the full complex.
+1. Defining subunits in stoichiometry file (by user).
+2. Predicting monomer and subcomponent structures using AF2/AFM (by user).
+3. Determining suitable modeling strategies (automated by HDM).
+4. Performing selected modeling strategies to model the full complex (automated by HDM).
 
 
 ## Demo
