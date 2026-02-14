@@ -1,8 +1,8 @@
 # HDOCK-Multimer
 
-`HDOCK-Multimer (HDM)` is an automated computational tool developed for predicting the structure of large protein assemblies. 
+`HDOCK-Multimer (HDM)` is a computational tool developed for predicting the structure of large protein assemblies. 
 
-With the stoichiometry file, provided monomer and subcomponent structures as input, `HDM` automatically selects suitable modeling strategies, including asymmetric docking, symmetric docking and assembly, and build the multimer structure. The final output is a set of ranked predicted structures of the full complex. 
+With the stoichiometry file, AlphaFold-predicted monomer and subcomponent structures as input, `HDM` automatically selects suitable modeling strategies, including asymmetric docking, symmetric docking and assembly. The final output is a set of ranked predicted structures of the full complex. 
 
 The `HDM` pipeline consists of 4 stages:
 1. Defining subunits in stoichiometry file (by user).
@@ -190,6 +190,53 @@ By running the script `HDM_pipeline.sh`:
 ```
 bash HDM_pipeline.sh -stoi <stoi.json> -mono_dir <mono_dir> -sub_dir <subcomponent_dir>
 ```
+
+## Extensions
+### Assembly with crosslink restraints
+HDM supports an optional assembly strategy that integrates **crosslinking distance restraints** between subunits. To use the extension, please confirm that tou have prepared the following inputs:
+
+-`stoi.json`: file recording stoichiometry and subunit definitions (same format as described above).
+
+-`subcomponent_dir`: folder containing the predicted subcomponent structures.
+
+-`crosslinks.txt`: file recording crosslink restraints between subunits. Each line in `crosslinks.txt` defines one crosslink restraint in the following format:
+```
+<res_i>  <chain_i>  <res_j>  <chain_j>  <min_distance>  <max_distance>  <w1>
+```
+where `w1` represents the experimental confidence of the crosslink restraint, such as the false discovery rate. An example is as follows:
+
+```
+73 A 45 B 0 30 0.88
+197 A 184 C 0 30 0.87
+123 B 75 E 0 30 0.95
+358 B 112 D 0 30 0.87
+```
+
+With the inputs ready, you can run HDM by the script `HDM_assemble_crosslinks.sh`:
+```
+bash HDM_assemble_crosslinks.sh -stoi <stoi.json> -crosslink <crosslinks.txt> -sub_dir <subcomponent_dir>
+```
+
+
+### Predict stoichiometry
+HDM supports predicting the stoichiometry (copy number) within a user-defined range by running the assembly pipeline for a set of candidate stoichiometries and selecting the best result. To use the extension, please confirm that you have prepared the following inputs:
+
+-`candidate_stoi.txt`: file recording candidate stoichiometries and their corresponding input paths. Each line in `candidate_stoi.txt` defines one candidate in the following format: 
+```
+complex_id subunit_id copy_number file_stoi subcomponent_dir
+```
+where `file_stoi` is the stoichiometry JSON file for the candidate. `subcomponent_dir` is the directory containing the predicted subcomponent structures for the candidate. Both `file_stoi` and `subcomponent_dir` should be prepared for the extension. An example is as follows:
+```
+example A 8 stoi_8.json subcomponents_8
+example A 9 stoi_9.json subcomponents_9
+example A 10 stoi_10.json subcomponents_10
+```
+
+With the inputs ready, you can run the stoichiometry prediction script `HDM_predict_stoi.sh`:
+```
+bash HDM_predict_stoi.sh -stois <candidate_stoi.txt>
+```
+
 
 ## References
 **HDOCKlite**

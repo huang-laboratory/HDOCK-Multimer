@@ -8,19 +8,20 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import gc
 import time
-import config
-from config import managed_tempfile, current_dir
+import xl_config as config
+from xl_config import managed_tempfile, current_dir
 import sys
 import shutil
 
-SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
-BASE_PATH = os.path.abspath(os.path.join(SCRIPT_PATH, ".."))
+UTILS_PATH = os.path.dirname(os.path.abspath(__file__))
+BASE_PATH = os.path.abspath(os.path.join(UTILS_PATH, ".."))
 TOOL_PATH = os.path.abspath(os.path.join(BASE_PATH, "..", "tools"))
+SCRIPTS_PATH = os.path.abspath(os.path.join(BASE_PATH, "..", "scripts"))
 AMBER_PATH = os.path.abspath(os.path.join(TOOL_PATH, "amber"))
 openmm_script = os.path.join(TOOL_PATH, "refine_model_openmm.py")
 scorecom = os.path.join(TOOL_PATH, "scorecom.sh")
 amber1 = os.path.join(AMBER_PATH, "3amberRefine1.sh")
-sys.path.append(BASE_PATH)
+sys.path.append(SCRIPTS_PATH)
 from parse_pdb import Chain, write_pdb_file
 
 
@@ -74,7 +75,7 @@ def calculate_itscore_md_openmm(orientation, i, md_steps):
                                 stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         it_score = float(result.stdout.strip())
         return i, it_score, md_file
-    
+
 # refine structure using Amber energy minimization, then calculate IT-score
 def calculate_itscore_md_amber(orientation, i, md_steps):
     with managed_tempfile(".pdb") as model_file, \
@@ -82,7 +83,7 @@ def calculate_itscore_md_amber(orientation, i, md_steps):
         write_pdb_file(orientation, model_file, config.format_lines)
         subprocess.run(f"bash {amber1} {model_file} {md_steps} {md_file}",
                        shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        result = subprocess.run(f"bash {scorecom} {md_file}", shell=True, check=True, 
+        result = subprocess.run(f"bash {scorecom} {md_file}", shell=True, check=True,
                                 stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         it_score = float(result.stdout.strip())
         return i, it_score, md_file
@@ -137,6 +138,44 @@ def check_subunits_connectivity(subunit_id1, subunit_id2, subunit1, subunit2):
         coords2 = subunit2.residues[-1]["CA"].get_coord()
     breaking_distance = np.linalg.norm(coords1 - coords2)
     return breaking_distance <= dist_threshold
+
+# extract residue indices for calculating spatial distance
+def select_xl_res_seq(chain1, chain2, restraint):
+    xl_chain1, xl_chain2 = restraint["chain1"], restraint["chain2"]
+    if chain1 == xl_chain1 and chain2 == xl_chain2:
+        res_seq1, res_seq2 = restraint["res1"], restraint["res2"]
+    else:
+        res_seq1, res_seq2 = restraint["res2"], restraint["res1"]
+    return res_seq1, res_seq2
+
+# check whether the residue pair satisfy crosslinking distance restraint
+def check_xl_for_pair(chain1, chain2, chain_struct1, chain_struct2, restraint):
+    res1, res2 = select_xl_res_seq(chain1, chain2, restraint)
+    start_res1, end_res1 = config.chains_range[chain1]
+    start_res2, end_res2 = config.chains_range[chain2]
+    coords1 = chain_struct1.residues[res1 - start_res1]["CA"].get_coord()
+    coords2 = chain_struct2.residues[res2 - start_res2]["CA"].get_coord()
+    distance = np.linalg.norm(coords1 - coords2)
+    min_distance, max_distance = restraint["minD"], restraint["maxD"]
+    return min_distance <= distance <= max_distance
+
+# calculate satisfaction ratio for given crosslink restraints
+def calculate_xl_satisfaction(total_xls: dict, satisfied_xls: dict):
+    total_xl_value, satisfied_xl_value = 0.0, 0.0
+    for xl_data in total_xls.values():
+        total_xl_value += xl_data["w1"] * xl_data["w2"]
+    for xl_data in satisfied_xls.values():
+        satisfied_xl_value += xl_data["w1"] * xl_data["w2"]
+    if total_xl_value != 0.0:
+        xl_satisfaction = satisfied_xl_value / total_xl_value
+    else:
+        xl_satisfaction = 1.0
+    return xl_satisfaction
+
+# update crosslink restraint records
+def upsert_xl_max_w2(xls: dict, xl_id, xl_data):
+    if xl_id not in xls or xl_data["w2"] > xls[xl_id]["w2"]:
+        xls[xl_id] = xl_data
 
 # convert split subunits into a full chain
 def create_full_orientation(old_orientation):
@@ -256,10 +295,9 @@ def calculate_rmsd(full_orientation1, full_orientation2):
     if config.homo_chains_list:
         full_orientation2 = search_subunits_mapping(full_orientation1, full_orientation2)
         ca_rmsd = calculate_rmsd_orientation(full_orientation1, full_orientation2)
-        return ca_rmsd
     else:
         ca_rmsd = calculate_rmsd_orientation(full_orientation1, full_orientation2)
-        return ca_rmsd
+    return ca_rmsd
 
 # calculate quality score for the population
 def check_population_confidence(all_results, check_point, rmsd_threshold):
@@ -280,10 +318,17 @@ def check_population_confidence(all_results, check_point, rmsd_threshold):
         if len(clstr_results) >= check_point:
             break
     confidence_score = clstr_results[-1]["if_score"]
-    return confidence_score
+    if "xl_satisfaction" in clstr_results[0]:
+        clstr_results.sort(key=lambda x: x["xl_satisfaction"], reverse=True)
+        xl_scale_factor = clstr_results[-1]["xl_satisfaction"]
+        return confidence_score, xl_scale_factor
+    else:
+        return confidence_score, None
 
 # rank structures according to the specified score then cluster
 def cluster_results(initial_results, population_size, rmsd_threshold, rank_type):
+    if "xl_satisfaction" in initial_results[0]:
+        initial_results.sort(key=lambda x: x["xl_satisfaction"], reverse=True)
     if rank_type == 1:
         initial_results.sort(key=lambda x: x["if_score"], reverse=True)
     elif rank_type == 2:
@@ -323,14 +368,14 @@ def add_results_itscore(results, num_cpus, md_steps, md_engine, fout):
             if md_engine == "openmm":
                 futures = [
                     executor.submit(
-                        calculate_itscore_md_openmm, 
+                        calculate_itscore_md_openmm,
                         item["result"]["full_orientation"], item["idx"], md_steps
                     ) for item in results_to_itscore
                 ]
             else:
                 futures = [
                     executor.submit(
-                        calculate_itscore_md_amber, 
+                        calculate_itscore_md_amber,
                         item["result"]["full_orientation"], item["idx"], md_steps
                     ) for item in results_to_itscore
                 ]
@@ -340,10 +385,59 @@ def add_results_itscore(results, num_cpus, md_steps, md_engine, fout):
                     calculate_itscore, item["result"]["full_orientation"], item["idx"]
                 ) for item in results_to_itscore
             ]
+
         for future in as_completed(futures):
             try:
                 i, it_score, file = future.result()
                 results[i]["it_score"] = it_score
+                results[i]["file"] = file
+            except Exception as e:
+                print(f"[ERROR] Failed in calculating IT-score: {e}", flush=True)
+            finally:
+                del future
+    gc.collect()
+    etime = time.time()
+    print(f"\ncalulate IT-score cost {etime - stime}", file=fout)
+    return results
+
+# calculate IT-score of the structure and multiplied with crosslink satisfaction rate
+def add_results_itscore_xl(results, num_cpus, md_steps, md_engine, fout):
+    stime = time.time()
+    results_to_itscore = [
+        {"idx": i, "result": result} for i, result in enumerate(results) if "it_score" not in result
+    ]
+    if not results_to_itscore:
+        return results
+
+    with ProcessPoolExecutor(max_workers=num_cpus) as executor:
+        if md_steps > 0:
+            if md_engine == "openmm":
+                futures = [
+                    executor.submit(
+                        calculate_itscore_md_openmm,
+                        item["result"]["full_orientation"], item["idx"], md_steps
+                    ) for item in results_to_itscore
+                ]
+            else:
+                futures = [
+                    executor.submit(
+                        calculate_itscore_md_amber,
+                        item["result"]["full_orientation"], item["idx"], md_steps
+                    ) for item in results_to_itscore
+                ]
+        else:
+            futures = [
+                executor.submit(
+                    calculate_itscore, item["result"]["full_orientation"], item["idx"]
+                ) for item in results_to_itscore
+            ]
+
+        for future in as_completed(futures):
+            try:
+                i, it_score, file = future.result()
+                scaled_it_score = results[i]["xl_satisfaction"] * it_score
+                results[i]["it_score"] = scaled_it_score
+                results[i]["original_it_score"] = it_score
                 results[i]["file"] = file
             except Exception as e:
                 print(f"[ERROR] Failed in calculating IT-score: {e}", flush=True)
@@ -363,7 +457,7 @@ def refine_output_model(i, result, model_file, md_steps, md_engine):
             subprocess.run(f"python {openmm_script} {file1} {md_steps} {model_file}",
                            shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         else:
-            subprocess.run(f"bash {amber1} {file1} {md_steps} {model_file}", 
+            subprocess.run(f"bash {amber1} {file1} {md_steps} {model_file}",
                            shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         os.remove(file1)
     else:
@@ -371,42 +465,69 @@ def refine_output_model(i, result, model_file, md_steps, md_engine):
 
 # print the final output model, ranked by IT-score
 def print_results_itscore(results, output, model_num, iteration, fout):
+    xl_scaled = "xl_satisfaction" in results[0]
+    if xl_scaled:
+        results.sort(key=lambda x: x["xl_satisfaction"], reverse=True)
     results.sort(key=lambda x: x["it_score"])
     stem, suffix = output.rsplit(".", 1)
     num_models = len(results)
     num_models = min(num_models, model_num)
     selected_results = results[:num_models]
     for i, result in enumerate(selected_results):
-        it_score = result["it_score"]
-        print(f"Iteration {iteration} model {i + 1} it_score: {it_score}", file=fout)
+        if xl_scaled:
+            xl_rate = result["xl_satisfaction"]
+            it_score = result["it_score"]
+            print(f"Iteration {iteration} model {i + 1} XL-satisfaction: {xl_rate}, XL-scaled it_score: {it_score}",
+                  file=fout)
+        else:
+            it_score = result["it_score"]
+            print(f"Iteration {iteration} model {i + 1} it_score: {it_score}", file=fout)
         modle_file = f"{current_dir}/{stem}{iteration}_{i + 1}.{suffix}"
         shutil.copy(result["file"], modle_file)
 
 # print the final output model, ranked by confidence
 def print_results_confidence(results, output, model_num, iteration, fout):
+    xl_scaled = "xl_satisfaction" in results[0]
+    if xl_scaled:
+        results.sort(key=lambda x: x["xl_satisfaction"], reverse=True)
     results.sort(key=lambda x: x["if_score"], reverse=True)
     stem, suffix = output.rsplit(".", 1)
     num_models = len(results)
     num_models = min(num_models, model_num)
     selected_results = results[:num_models]
     for i, result in enumerate(selected_results):
-        confidence = result["if_score"]
-        print(f"Iteration {iteration} model {i + 1} confidence_score: {confidence}", 
-              file=fout)
+        if xl_scaled:
+            xl_rate = result["xl_satisfaction"]
+            confidence = result["if_score"]
+            print(f"Iteration {iteration} model {i + 1} XL-satisfaction: {xl_rate}, XL-scaled confidence_score: {confidence}",
+                  file=fout)
+        else:
+            confidence = result["if_score"]
+            print(f"Iteration {iteration} model {i + 1} confidence_score: {confidence}",
+                  file=fout)
         model_file = f"{current_dir}/{stem}{iteration}_{i + 1}.{suffix}"
         write_pdb_file(result["full_orientation"], model_file, config.format_lines)
 
 # print the final output model after MD relaxation, ranked by confidence
 def print_results_confidence_md(results, output, model_num, iteration, md_steps, md_engine, fout):
+    xl_scaled = "xl_satisfaction" in results[0]
+    if xl_scaled:
+        results.sort(key=lambda x: x["xl_satisfaction"], reverse=True)
     results.sort(key=lambda x: x["if_score"], reverse=True)
     stem, suffix = output.rsplit(".", 1)
     num_models = len(results)
     num_models = min(num_models, model_num)
     selected_results = results[:num_models]
     for i, result in enumerate(selected_results):
-        confidence = results["if_score"]
-        print(f"Iteration {iteration} model {i + 1} confidence_score: {confidence}", 
-              file=fout)
+        if xl_scaled:
+            xl_rate = result["xl_satisfaction"]
+            confidence = result["if_score"]
+            print(f"Iteration {iteration} model {i + 1} XL-satisfaction: {xl_rate}, XL-scaled confidence_score: {confidence}",
+                  file=fout)
+        else:
+            confidence = result["if_score"]
+            print(f"Iteration {iteration} model {i + 1} confidence_score: {confidence}",
+                  file=fout)
         model_file = f"{current_dir}/{stem}{iteration}_{i + 1}.{suffix}"
         file1 = f"{current_dir}/0-{stem}{iteration}_{i + 1}.{suffix}"
         write_pdb_file(result["full_orientation"], file1, config.format_lines)
@@ -414,16 +535,22 @@ def print_results_confidence_md(results, output, model_num, iteration, md_steps,
             subprocess.run(f"python {openmm_script} {file1} {md_steps} {model_file}",
                            shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         else:
-            subprocess.run(f"bash {amber1} {file1} {md_steps} {model_file}", 
+            subprocess.run(f"bash {amber1} {file1} {md_steps} {model_file}",
                            shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         os.remove(file1)
 
 # select a set of optimal subcomplexes when assembly fails
 def select_optimal_subcomplex(initial_results):
-    return max(
-        initial_results,
-        key=lambda x: (x["max_length"], x["mean_length"], x["if_score"])
-    )
+    if "xl_satisfaction" in initial_results[0]:
+        return max(
+            initial_results,
+            key=lambda x: (x["max_length"], x["mean_length"], x["if_score"], x["xl_satisfaction"])
+        )
+    else:
+        return max(
+            initial_results,
+            key=lambda x: (x["max_length"], x["mean_length"], x["if_score"])
+        )
 
 # comvert the group ID of the optimal subcomplexes into full chain ID
 def create_full_group(old_groups):

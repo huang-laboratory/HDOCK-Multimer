@@ -17,6 +17,7 @@ import sys
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_PATH = os.path.abspath(os.path.join(SCRIPT_PATH, "..", ".."))
 TOOL_PATH = os.path.abspath(os.path.join(BASE_PATH, "..", "tools"))
+AMBER_PATH = os.path.abspath(os.path.join(TOOL_PATH, "amber"))
 
 sys.path.append(BASE_PATH)
 from parse_pdb import PDBParser, load_format_line, write_pdb_file
@@ -26,6 +27,7 @@ pdb_parser = PDBParser()
 format_lines = load_format_line(os.path.join(BASE_PATH, "format.pdb"))
 steric_clash_dist = 2
 openmm_script = os.path.join(TOOL_PATH, "refine_model_openmm.py")
+amber1 = os.path.join(AMBER_PATH, "3amberRefine1.sh")
 scorecom = os.path.join(TOOL_PATH, "scorecom.sh")
 chdock = os.path.join(TOOL_PATH, "chdock")
 compcn = os.path.join(TOOL_PATH, "compcn")
@@ -225,7 +227,7 @@ def calculate_itscore(chains):
         return it_score, model_file
 
 # refine structure using OpenMM energy minimization, then calculate IT-score
-def calculate_itscore_md(chains, md_steps):
+def calculate_itscore_md_openmm(chains, md_steps):
     with managed_tempfile(".pdb") as model_file, \
             managed_tempfile(".pdb", delete_ok=False) as md_file:
         write_pdb_file(chains, model_file, format_lines)
@@ -235,25 +237,41 @@ def calculate_itscore_md(chains, md_steps):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         it_score = float(result.stdout.strip())
         return it_score, md_file
+    
+# refine structure using Amber energy minimization, then calculate IT-score
+def calculate_itscore_md_amber(chains, md_steps):
+    with managed_tempfile(".pdb") as model_file, \
+            managed_tempfile(".pdb", delete_ok=False) as md_file:
+        write_pdb_file(chains, model_file, format_lines)
+        subprocess.run(f"bash {amber1} {model_file} {md_steps} {md_file}", 
+                       shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(f"bash {scorecom} {md_file}", shell=True, check=True, 
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        it_score = float(result.stdout.strip())
+        return it_score, md_file
 
 # refine the final output model, not used
-def refine_output_model(i, result, model_file, md_steps):
+def refine_output_model(i, result, model_file, md_steps, md_engine):
     if md_steps > 0:
         file1 = f"{current_dir}/0-Tsym_{i + 1}.pdb"
         write_pdb_file(result["chains"], file1, format_lines)
-        subprocess.run(f"python {openmm_script} {file1} {md_steps} {model_file}",
-                       shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        if md_engine == "openmm":
+            subprocess.run(f"python {openmm_script} {file1} {md_steps} {model_file}",
+                           shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        else:
+            subprocess.run(f"bash {amber1} {file1} {md_steps} {model_file}", 
+                           shell=True, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         os.remove(file1)
     else:
         write_pdb_file(result["chains"], model_file, format_lines)
 
 # print the final output models, not used
-def print_results(results, output_file, num_cpus, md_steps):
+def print_results(results, output_file, num_cpus, md_steps, md_engine):
     stem, suffix = output_file.rsplit(".", 1)
     with ProcessPoolExecutor(max_workers=num_cpus) as executor:
         futures = [
             executor.submit(
-                refine_output_model, i, result, f"{stem}_{i + 1}.{suffix}", md_steps
+                refine_output_model, i, result, f"{stem}_{i + 1}.{suffix}", md_steps, md_engine
             ) for i, result in enumerate(results)
         ]
         for future in as_completed(futures):
@@ -323,7 +341,7 @@ def generate_initial_results_1(c2_modes_all, c3_modes_all, num_cpus):
     return initial_results
 
 # perform sliding optimization on the C2-C3-formed T-symmetric systems
-def sliding_optimization_1(result, md_steps):
+def sliding_optimization_1(result, md_steps, md_engine):
     c3_axes = result["c3_axes"]
     start_chains = result["chains"]
     step_size = 1.0
@@ -343,7 +361,10 @@ def sliding_optimization_1(result, md_steps):
         sliding_results.append({"step": step, "chains": new_chains})
     if md_steps > 0:
         for sliding_result in sliding_results:
-            it_score, file = calculate_itscore_md(sliding_result["chains"], md_steps)
+            if md_engine == "openmm":
+                it_score, file = calculate_itscore_md_openmm(sliding_result["chains"], md_steps)
+            else:
+                it_score, file = calculate_itscore_md_amber(sliding_result["chains"], md_steps)
             sliding_result["it_score"] = it_score
             sliding_result["file"] = file
     else:
@@ -361,11 +382,11 @@ def sliding_optimization_1(result, md_steps):
     return result
 
 # optimize all C2-C3-formed T-symmetric systems
-def refine_results_1(initial_results, num_cpus, md_steps, num_models):
+def refine_results_1(initial_results, num_cpus, md_steps, md_engine, num_models):
     refined_results = []
     with ProcessPoolExecutor(max_workers=num_cpus) as executor:
         futures = [
-            executor.submit(sliding_optimization_1, result, md_steps)
+            executor.submit(sliding_optimization_1, result, md_steps, md_engine)
             for result in initial_results
         ]
         for future in as_completed(futures):
@@ -499,7 +520,7 @@ def generate_initial_results_2(c3_modes_all, num_cpus, angle_step):
     return initial_results
 
 # perform sliding optimization on the C3-formed T-symmetric systems
-def sliding_optimization_2(idx, result, md_steps):
+def sliding_optimization_2(idx, result, md_steps, md_engine):
     c3_idx = result["c3_idx"]
     c3_axes = result["c3_axes"]
     start_chains = result["chains"]
@@ -535,7 +556,10 @@ def sliding_optimization_2(idx, result, md_steps):
         sliding_result["file"] = file
     sliding_results.sort(key=lambda x: x["it_score"])
     if md_steps > 0:
-        it_score, file = calculate_itscore_md(sliding_results[0]["chains"], md_steps)
+        if md_engine == "openmm":
+            it_score, file = calculate_itscore_md_openmm(sliding_results[0]["chains"], md_steps)
+        else:
+            it_score, file = calculate_itscore_md_amber(sliding_results[0]["chains"], md_steps)
         sliding_results[0]["it_score"] = it_score
         sliding_results[0]["file"] = file
     # etime = datetime.now()
@@ -543,11 +567,11 @@ def sliding_optimization_2(idx, result, md_steps):
     return sliding_results[0]
 
 # optimize all C3-formed T-symmetric systems
-def refine_results_2(initial_results, num_cpus, md_steps, num_models):
+def refine_results_2(initial_results, num_cpus, md_steps, md_engine, num_models):
     refined_results = []
     with ProcessPoolExecutor(max_workers=num_cpus) as executor:
         futures = [
-            executor.submit(sliding_optimization_2, i, result, md_steps)
+            executor.submit(sliding_optimization_2, i, result, md_steps, md_engine)
             for i, result in enumerate(initial_results)
         ]
         for future in as_completed(futures):
@@ -569,6 +593,8 @@ def main():
     parser.add_argument("-w", "--workers", type=int, default=20)
     parser.add_argument("-o", "--output", type=str, required=True)
     parser.add_argument("-m", "--md", type=int, default=500)
+    parser.add_argument("-e", "--md_engine", type=str, 
+                        choices=["openmm", "amber"], default="openmm")
     parser.add_argument("-n", "--nmax", type=int, default=10)
 
     args = parser.parse_args()
@@ -579,6 +605,7 @@ def main():
     output_file = args.output
     stem, suffix = output_file.rsplit(".", 1)
     md_steps = args.md
+    md_engine = args.md_engine
     num_models = args.nmax
 
     start_time = time.time()
@@ -635,7 +662,7 @@ def main():
                 continue
             results.sort(key=lambda x: x["c2_idx"])
             selected_results.append(results[0])
-        refined_results = refine_results_1(selected_results, num_cpus, md_steps, num_models)
+        refined_results = refine_results_1(selected_results, num_cpus, md_steps, md_engine, num_models)
         end_time = time.time()
         with open(f"{current_dir}/aa2.log", 'w+') as fout:
             for i, result in enumerate(refined_results):
@@ -652,7 +679,7 @@ def main():
         angle_step = np.pi / 12
         new_initial_results = generate_initial_results_2(c3_modes_all, num_cpus, angle_step)
         if new_initial_results:
-            refined_results = refine_results_2(new_initial_results, num_cpus, md_steps, num_models)
+            refined_results = refine_results_2(new_initial_results, num_cpus, md_steps, md_engine, num_models)
             end_time = time.time()
             with open(f"{current_dir}/aa2.log", 'w+') as fout:
                 for i, result in enumerate(refined_results):
